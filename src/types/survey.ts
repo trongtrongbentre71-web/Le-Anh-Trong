@@ -317,9 +317,28 @@ export interface AiActionUpdatePoints {
 export interface AiActionDeleteData {
   type: 'deleteData';
   payload: {
-    target: 'controlPoints' | 'traverseRows' | 'detailRows' | 'all' | 'resetSample';
+    target?:
+      | 'controlPoints'
+      | 'traverseRows'
+      | 'detailRows'
+      | 'current'
+      | 'all'
+      | 'resetSample'
+      | string;
     names?: string[];
+    rowIndices?: number[];
+    deleteLastN?: number;
+    stationNames?: string[];
+    orientNames?: string[];
+    kind?: PointKind;
+    noteContains?: string;
     deleteErrorMiaRows?: boolean;
+    keepOnlyNames?: string[];
+    deduplicate?: boolean;
+    minDistanceM?: number;
+    maxDistanceM?: number;
+    minH?: number;
+    maxH?: number;
     clearAll?: boolean;
   };
 }
@@ -332,10 +351,12 @@ export interface AiActionExportData {
   };
 }
 
+export type TabKey = 'control' | 'traverse' | 'detail' | 'height' | 'map';
+
 export interface AiActionNavigateOrOpenTool {
   type: 'navigateOrOpenTool';
   payload: {
-    tab?: 'control' | 'traverse' | 'detail' | 'height' | 'map';
+    tab?: TabKey;
     openModal?: 'guide' | 'sheets' | 'camera' | 'import_file';
   };
 }

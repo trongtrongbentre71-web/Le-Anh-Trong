@@ -319,27 +319,82 @@ const updatePointsTool: FunctionDeclaration = {
 const deleteDataTool: FunctionDeclaration = {
   name: 'deleteData',
   description:
-    'Xóa các điểm/trạm/mốc cụ thể theo tên, xóa các điểm vượt sai số mia (>2mm), xóa trắng toàn bộ 1 bảng hoặc tất cả bảng, hoặc khôi phục lại bộ dữ liệu mẫu ban đầu.',
+    'Xóa dữ liệu linh hoạt theo mọi yêu cầu của người dùng: xóa theo tên điểm/mốc/trạm, xóa theo số thứ tự dòng (STT), xóa N dòng cuối, xóa các điểm đặt máy tại 1 trạm cụ thể, xóa theo điểm định hướng, xóa theo loại điểm (chi tiết/trạm chuyền), xóa theo từ khóa ghi chú, xóa điểm vượt sai số mia (>2mm), xóa theo điều kiện khoảng cách/cao độ, giữ lại chỉ các điểm chỉ định (xóa phần còn lại), xóa điểm trùng tên, xóa trắng 1 bảng hoặc tất cả bảng, hoặc khôi phục lại bộ dữ liệu mẫu.',
   parameters: {
     type: Type.OBJECT,
     properties: {
       target: {
         type: Type.STRING,
         description:
-          'Đối tượng xóa: "controlPoints" (Tab 1), "traverseRows" (Tab 2), "detailRows" (Tab 3), "all" (xóa sạch toàn bộ dữ liệu để làm bài mới), hoặc "resetSample" (khôi phục dữ liệu mẫu gốc).',
+          'Bảng cần xóa: "controlPoints" (Tab 1 Mốc gốc), "traverseRows" (Tab 2 Đường chuyền 2 mặt), "detailRows" (Tab 3 Sổ đo chi tiết), "current" (Tab người dùng đang mở), "all" (toàn bộ cả 3 bảng), hoặc "resetSample" (khôi phục dữ liệu mẫu gốc).',
       },
       names: {
         type: Type.ARRAY,
         items: { type: Type.STRING },
-        description: 'Danh sách tên điểm/mốc/trạm cần xóa (ví dụ ["P4", "P5"] hoặc ["M2"]).',
+        description:
+          'Danh sách tên điểm/mốc/trạm cần xóa (ví dụ ["P4", "P5"], ["M0"], ["T1"]). Lưu ý: chỉ truyền tên bản thân điểm/mốc muốn xóa; nếu muốn xóa các điểm ĐẶT MÁY TẠI trạm M2 hãy dùng stationNames thay vì names.',
+      },
+      rowIndices: {
+        type: Type.ARRAY,
+        items: { type: Type.NUMBER },
+        description:
+          'Danh sách số thứ tự dòng (STT bắt đầu từ 1, ví dụ [1, 2] để xóa dòng 1 và dòng 2; dùng số âm như [-1] để xóa dòng cuối cùng).',
+      },
+      deleteLastN: {
+        type: Type.NUMBER,
+        description: 'Xóa N dòng cuối cùng của bảng (ví dụ 2 để xóa 2 điểm/dòng cuối).',
+      },
+      stationNames: {
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
+        description:
+          'Xóa toàn bộ điểm đo chi tiết đặt máy TẠI các trạm này (ví dụ ["M2"] để xóa các điểm đo từ trạm M2 như P5, P6 mà không xóa nhầm điểm M2), hoặc xóa dòng đường chuyền đặt tại trạm này.',
+      },
+      orientNames: {
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
+        description: 'Xóa các điểm đo chi tiết có điểm định hướng (ĐH) trùng với danh sách này.',
+      },
+      kind: {
+        type: Type.STRING,
+        description: 'Trong Tab 3: "detail" để xóa toàn bộ điểm chi tiết, hoặc "station" để xóa toàn bộ trạm chuyền.',
+      },
+      noteContains: {
+        type: Type.STRING,
+        description: 'Xóa các dòng có cột Ghi chú chứa từ khóa này (không phân biệt hoa thường/dấu).',
       },
       deleteErrorMiaRows: {
         type: Type.BOOLEAN,
-        description: 'Nếu true (với target="detailRows"): tự động lọc và xóa toàn bộ các điểm bị lỗi sai số mia > 2mm.',
+        description: 'Nếu true (Tab 3): tự động lọc và xóa toàn bộ các điểm bị lỗi sai số mia > 2mm.',
+      },
+      keepOnlyNames: {
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
+        description: 'Giữ lại DUY NHẤT các điểm/mốc có tên trong danh sách này và xóa tất cả các dòng khác trong bảng.',
+      },
+      deduplicate: {
+        type: Type.BOOLEAN,
+        description: 'Nếu true: tự động xóa các dòng bị trùng tên điểm/mốc (giữ lại dòng xuất hiện đầu tiên).',
+      },
+      minDistanceM: {
+        type: Type.NUMBER,
+        description: 'Trong Tab 3: xóa các điểm có khoảng cách ngang D > minDistanceM (mét).',
+      },
+      maxDistanceM: {
+        type: Type.NUMBER,
+        description: 'Trong Tab 3: xóa các điểm có khoảng cách ngang D < maxDistanceM (mét).',
+      },
+      minH: {
+        type: Type.NUMBER,
+        description: 'Xóa các điểm/mốc có cao độ H > minH (mét).',
+      },
+      maxH: {
+        type: Type.NUMBER,
+        description: 'Xóa các điểm/mốc có cao độ H < maxH (mét).',
       },
       clearAll: {
         type: Type.BOOLEAN,
-        description: 'Nếu true: xóa sạch toàn bộ các dòng trong bảng được chọn.',
+        description: 'Nếu true: xóa sạch toàn bộ các dòng trong bảng được chọn (hoặc cả 3 bảng khi target="all").',
       },
     },
     required: ['target'],
@@ -803,7 +858,13 @@ Bạn có đầy đủ quyền thực thi trực tiếp mọi thao tác trên ph
    - Khi người dùng gửi ảnh chụp, chèn ảnh, PDF, Excel/CSV hoặc gõ đề bài: phân tích đầy đủ dữ kiện, yêu cầu, công thức TCVN và gọi ĐỒNG THỜI các hàm nhập cho Tab 1, Tab 2, Tab 3 nếu có số liệu.
    - Dùng \`mode: "replace"\` khi người dùng gửi đề bài mới trọn vẹn hoặc yêu cầu thay mới; dùng \`mode: "append"\` khi thêm bổ sung.
 3. **Chỉnh sửa từng mốc / trạm / điểm (\`updatePoints\`)**: Sửa nhanh tọa độ X/Y/H mốc gốc, sửa góc/chỉ mia/ghi chú/loại điểm của bất kỳ dòng nào theo tên điểm (ví dụ "sửa cao độ M1 thành 12.5m", "sửa chỉ giữa P4 thành 1550mm cho hết lệch mia").
-4. **Xóa dữ liệu & Khôi phục mẫu (\`deleteData\`)**: Xóa điểm theo tên (ví dụ "xóa P4 và P5"), xóa toàn bộ điểm bị lỗi mia \`> 2mm\` (\`deleteErrorMiaRows: true\`), xóa trắng 1 bảng hoặc xóa sạch toàn bộ dữ liệu để nhập bài mới (\`target: "all", clearAll: true\`), hoặc khôi phục lại dữ liệu mẫu gốc (\`target: "resetSample"\`).
+4. **Xóa dữ liệu & Khôi phục mẫu (\`deleteData\`) — BẮT BUỘC GỌI HÀM NGAY KHI NGƯỜI DÙNG YÊU CẦU XÓA**:
+   - Xóa theo tên điểm/mốc/trạm: dùng \`names\` (vd "xóa P4 và P5" -> \`target: "detailRows", names: ["P4", "P5"]\`; "xóa mốc M0" -> \`target: "controlPoints", names: ["M0"]\`; "xóa cạnh M1→T1" -> \`target: "traverseRows", names: ["M1"]\` hoặc \`rowIndices: [1]\`).
+   - Xóa theo vị trí dòng (STT 1, 2, 3...) hoặc N dòng cuối: dùng \`rowIndices\` (bắt đầu từ 1, \`-1\` là dòng cuối) hoặc \`deleteLastN\`.
+   - Xóa các điểm đo **đặt máy tại 1 trạm** (vd "xóa các điểm đo ở trạm M2"): PHẢI dùng \`stationNames: ["M2"]\` (KHÔNG dùng \`names: ["M2"]\` vì sẽ xóa nhầm điểm M2).
+   - Xóa theo điều kiện: lỗi mia \`> 2mm\` (\`deleteErrorMiaRows: true\`), theo ghi chú (\`noteContains\`), theo loại điểm (\`kind: "detail" | "station"\`), theo khoảng cách/cao độ (\`minDistanceM/maxDistanceM/minH/maxH\`), giữ lại một vài điểm và xóa phần còn lại (\`keepOnlyNames\`), xóa trùng tên (\`deduplicate: true\`).
+   - Xóa trắng bảng đang mở (\`target: "current", clearAll: true\`), xóa trắng 1 bảng cụ thể (\`clearAll: true\`), xóa sạch toàn bộ cả 3 bảng (\`target: "all", clearAll: true\`), hoặc khôi phục dữ liệu mẫu (\`target: "resetSample"\`).
+   - KHÔNG BAO GIỜ từ chối hoặc bảo "tôi không xóa được" — bạn có đầy đủ quyền xóa trực tiếp mọi bảng dữ liệu!
 5. **Xuất file trực tiếp (\`exportData\`)**: Khi người dùng yêu cầu xuất/tải Excel WPS (\`excel_wps\`), CSV Civil 3D (\`civil3d_csv\`) hoặc AutoCAD Script (\`autocad_scr\`), HÃY GỌI \`exportData\` để tải file ngay xuống máy.
 6. **Mở tab & Công cụ (\`navigateOrOpenTool\`)**: Chuyển nhanh sang Tab 1–5 (ví dụ "mở bình đồ 2D" -> \`tab: "map"\`) hoặc mở hộp thoại Google Sheets (\`sheets\`), Hướng dẫn Máy & Mia (\`guide\`), Camera quét (\`camera\`), hoặc chọn file Excel/CSV để nhập (\`import_file\`).
 7. **Có thể kết hợp nhiều thao tác trong 1 lệnh duy nhất!** Ví dụ: "Đổi đơn vị mia sang m, xóa điểm P4 lỗi mia, rồi xuất file Excel WPS giúp mình" -> gọi cùng lúc \`updateSettings\` + \`deleteData\` + \`exportData\`.

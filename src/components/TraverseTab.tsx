@@ -60,7 +60,6 @@ export const TraverseTab: React.FC<TraverseTabProps> = ({
   };
 
   const handleDeleteRow = (id: string) => {
-    if (rows.length <= 2) return;
     onChangeRows(rows.filter((r) => r.id !== id));
   };
 
@@ -478,15 +477,21 @@ export const TraverseTab: React.FC<TraverseTabProps> = ({
                     <button
                       type="button"
                       onClick={() => handleDeleteRow(row.id)}
-                      disabled={rows.length <= 2}
                       aria-label={`Xóa cạnh ${row.stationName}-${row.targetName}`}
-                      className="inline-flex h-7 w-7 items-center justify-center rounded text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-30"
+                      className="inline-flex h-7 w-7 items-center justify-center rounded text-slate-400 hover:bg-red-50 hover:text-red-600"
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>
                   </td>
                 </tr>
               ))}
+              {rows.length === 0 && (
+                <tr>
+                  <td colSpan={14} className="px-4 py-8 text-center text-xs text-slate-400">
+                    Chưa có trạm đo đường chuyền nào. Bấm "Thêm trạm đo" hoặc yêu cầu Trợ lý AI nhập từ đề bài / khôi phục mẫu.
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>

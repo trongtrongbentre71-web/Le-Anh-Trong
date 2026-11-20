@@ -17,6 +17,7 @@ import type {
   DetailUnitSettings,
   LengthUnit,
   MapPoint,
+  TabKey,
   TraverseConfig,
   TraverseRow,
   UnifiedStation,
@@ -48,8 +49,8 @@ import {
   convertAiTraverseRows,
   convertDetailRowsUnitChange,
   convertTraverseRowsUnitChange,
-  matchNameInList,
 } from './utils/chatAttachments';
+import { executeSurveyDelete } from './utils/surveyDelete';
 import { normalizeInstrumentHeightM, normalizeMiaToMm } from './utils/cameraOcr';
 import { ControlBenchmarksTab } from './components/ControlBenchmarksTab';
 import { TraverseTab } from './components/TraverseTab';
@@ -60,8 +61,6 @@ import { AiAssistantSidebar } from './components/AiAssistantSidebar';
 import { InstrumentGuideModal } from './components/InstrumentGuideModal';
 import { GoogleSheetsModal } from './components/GoogleSheetsModal';
 import { CameraScannerModal } from './components/CameraScannerModal';
-
-type TabKey = 'control' | 'traverse' | 'detail' | 'height' | 'map';
 
 const TABS: Array<{ key: TabKey; label: string }> = [
   { key: 'control', label: '1. Mốc gốc' },
@@ -96,9 +95,17 @@ export default function App() {
   const [pendingExport, setPendingExport] = useState<AiActionExportData['payload'] | null>(null);
 
   const quickFileInputRef = useRef<HTMLInputElement | null>(null);
+  const activeTabRef = useRef<TabKey>(activeTab);
+  const controlPointsRef = useRef<ControlPoint[]>(controlPoints);
+  const traverseRowsRef = useRef<TraverseRow[]>(traverseRows);
+  const detailRowsRef = useRef<DetailSurveyRow[]>(detailRows);
   const detailUnitsRef = useRef<DetailUnitSettings>(detailUnits);
   const detailVertModeRef = useRef<VerticalCircleMode>(detailVertMode);
   const traverseConfigRef = useRef<TraverseConfig>(traverseConfig);
+  activeTabRef.current = activeTab;
+  controlPointsRef.current = controlPoints;
+  traverseRowsRef.current = traverseRows;
+  detailRowsRef.current = detailRows;
   detailUnitsRef.current = detailUnits;
   detailVertModeRef.current = detailVertMode;
   traverseConfigRef.current = traverseConfig;
@@ -176,7 +183,21 @@ export default function App() {
   // Serialize live project context for Gemini AI Assistant
   const surveyContext = useMemo(
     () => ({
-      controlPoints,
+      activeTab,
+      controlPoints: controlPoints.map((cp, idx) => ({
+        stt: idx + 1,
+        name: cp.name,
+        x: cp.x,
+        y: cp.y,
+        h: cp.h,
+        note: cp.note,
+      })),
+      traverseRows: traverseRows.map((tr, idx) => ({
+        stt: idx + 1,
+        stationName: tr.stationName,
+        targetName: tr.targetName,
+        instrumentHeight: tr.instrumentHeight,
+      })),
       traverseSummary: {
         type: traverseConfig.traverseType,
         grade: traverseConfig.toleranceGrade,
@@ -197,7 +218,8 @@ export default function App() {
       },
       detailUnits,
       detailVerticalMode: detailVertMode,
-      detailRows: detailComputed.computedRows.map((r) => ({
+      detailRows: detailComputed.computedRows.map((r, idx) => ({
+        stt: idx + 1,
         pointName: r.pointName,
         stationName: r.stationName,
         orientName: r.orientName,
@@ -213,7 +235,9 @@ export default function App() {
       })),
     }),
     [
+      activeTab,
       controlPoints,
+      traverseRows,
       traverseConfig,
       traverseSummary,
       detailUnits,
@@ -493,11 +517,21 @@ export default function App() {
     }
 
     if (action.type === 'deleteData') {
-      const p = action.payload;
-      if (p.target === 'resetSample') {
+      const result = executeSurveyDelete(action.payload, {
+        controlPoints: controlPointsRef.current,
+        traverseRows: traverseRowsRef.current,
+        detailRows: detailRowsRef.current,
+        computedDetailRows: detailComputed.computedRows,
+        activeTab: activeTabRef.current,
+      });
+
+      if (result.resetSample) {
+        controlPointsRef.current = INITIAL_CONTROL_POINTS;
         traverseConfigRef.current = INITIAL_TRAVERSE_CONFIG;
+        traverseRowsRef.current = INITIAL_TRAVERSE_ROWS;
         detailUnitsRef.current = INITIAL_DETAIL_UNITS;
         detailVertModeRef.current = 'Z';
+        detailRowsRef.current = INITIAL_DETAIL_ROWS;
         setControlPoints(INITIAL_CONTROL_POINTS);
         setTraverseConfig(INITIAL_TRAVERSE_CONFIG);
         setTraverseRows(INITIAL_TRAVERSE_ROWS);
@@ -505,72 +539,25 @@ export default function App() {
         setDetailCurvature(true);
         setDetailVertMode('Z');
         setDetailRows(INITIAL_DETAIL_ROWS);
-        showNotice('Trợ lý AI đã khôi phục lại toàn bộ dữ liệu mẫu ban đầu.');
-        return 'Đã khôi phục bộ dữ liệu mẫu gốc';
+        showNotice(`Trợ lý AI: ${result.summary}.`);
+        return result.summary;
       }
 
-      if (p.target === 'all') {
-        setControlPoints([]);
-        setTraverseRows([]);
-        setDetailRows([]);
-        showNotice('Trợ lý AI đã xóa sạch dữ liệu cả 3 bảng để bạn bắt đầu khu đo mới.');
-        return 'Đã xóa sạch dữ liệu Mốc gốc, Đường chuyền và Sổ đo chi tiết';
+      if (result.controlPoints !== controlPointsRef.current) {
+        controlPointsRef.current = result.controlPoints;
+        setControlPoints(result.controlPoints);
+      }
+      if (result.traverseRows !== traverseRowsRef.current) {
+        traverseRowsRef.current = result.traverseRows;
+        setTraverseRows(result.traverseRows);
+      }
+      if (result.detailRows !== detailRowsRef.current) {
+        detailRowsRef.current = result.detailRows;
+        setDetailRows(result.detailRows);
       }
 
-      if (p.target === 'controlPoints') {
-        if (p.clearAll) {
-          setControlPoints([]);
-          showNotice('Trợ lý AI đã xóa toàn bộ bảng Mốc gốc (Tab 1).');
-          return 'Đã xóa sạch bảng Mốc gốc (Tab 1)';
-        }
-        const names = p.names || [];
-        if (names.length > 0) {
-          setControlPoints((prev) => prev.filter((c) => !matchNameInList(c.name, names)));
-          const label = `Đã xóa mốc gốc: ${names.join(', ')}`;
-          showNotice(`Trợ lý AI: ${label}.`);
-          return label;
-        }
-      }
-
-      if (p.target === 'traverseRows') {
-        if (p.clearAll) {
-          setTraverseRows([]);
-          showNotice('Trợ lý AI đã xóa toàn bộ bảng Đường chuyền 2 mặt (Tab 2).');
-          return 'Đã xóa sạch bảng Đường chuyền 2 mặt (Tab 2)';
-        }
-        const names = p.names || [];
-        if (names.length > 0) {
-          setTraverseRows((prev) =>
-            prev.filter((r) => !matchNameInList(r.stationName, names) && !matchNameInList(r.targetName, names))
-          );
-          const label = `Đã xóa trạm đường chuyền: ${names.join(', ')}`;
-          showNotice(`Trợ lý AI: ${label}.`);
-          return label;
-        }
-      }
-
-      if (p.target === 'detailRows') {
-        if (p.clearAll) {
-          setDetailRows([]);
-          showNotice('Trợ lý AI đã xóa toàn bộ Sổ đo chi tiết (Tab 3).');
-          return 'Đã xóa sạch Sổ đo chi tiết (Tab 3)';
-        }
-        if (p.deleteErrorMiaRows) {
-          const badIds = new Set(detailComputed.computedRows.filter((r) => !r.isMiaOk).map((r) => r.id));
-          setDetailRows((prev) => prev.filter((r) => !badIds.has(r.id)));
-          const label = `Đã xóa ${badIds.size} điểm vượt sai số mia (> 2mm)`;
-          showNotice(`Trợ lý AI: ${label}.`);
-          return label;
-        }
-        const names = p.names || [];
-        if (names.length > 0) {
-          setDetailRows((prev) => prev.filter((r) => !matchNameInList(r.pointName, names)));
-          const label = `Đã xóa điểm chi tiết: ${names.join(', ')}`;
-          showNotice(`Trợ lý AI: ${label}.`);
-          return label;
-        }
-      }
-      return '';
+      showNotice(`Trợ lý AI: ${result.summary}.`);
+      return result.summary;
     }
 
     if (action.type === 'exportData') {
@@ -588,6 +575,7 @@ export default function App() {
       const p = action.payload;
       const parts: string[] = [];
       if (p.tab) {
+        activeTabRef.current = p.tab;
         setActiveTab(p.tab);
         const tabLabels: Record<TabKey, string> = {
           control: 'Tab 1 (Mốc gốc)',
@@ -618,7 +606,10 @@ export default function App() {
       const converted = convertAiControlPoints(action.payload);
       if (converted.length === 0) return '';
       const mode = action.payload.mode === 'replace' ? 'replace' : 'append';
-      setControlPoints((prev) => (mode === 'replace' ? converted : [...prev, ...converted]));
+      const nextControl = mode === 'replace' ? converted : [...controlPointsRef.current, ...converted];
+      controlPointsRef.current = nextControl;
+      setControlPoints(nextControl);
+      activeTabRef.current = 'control';
       setActiveTab('control');
       const label = `Đã ${mode === 'replace' ? 'thay thế' : 'thêm'} ${converted.length} mốc gốc vào Tab 1 (${converted.map((c) => c.name).join(', ')})`;
       showNotice(`Trợ lý AI: ${label}.`);
@@ -628,29 +619,35 @@ export default function App() {
     if (action.type === 'importTraverseData') {
       const cfg = action.payload.config;
       if (cfg) {
-        setTraverseConfig((prev) => ({
-          ...prev,
-          verticalMode: cfg.verticalMode === 'V' || cfg.verticalMode === 'Z' ? cfg.verticalMode : prev.verticalMode,
+        const curTrCfg = traverseConfigRef.current;
+        const nextTrCfg: TraverseConfig = {
+          ...curTrCfg,
+          verticalMode: cfg.verticalMode === 'V' || cfg.verticalMode === 'Z' ? cfg.verticalMode : curTrCfg.verticalMode,
           traverseType:
             cfg.traverseType === 'closed' || cfg.traverseType === 'connecting'
               ? cfg.traverseType
-              : prev.traverseType,
+              : curTrCfg.traverseType,
           toleranceGrade:
             cfg.toleranceGrade === 'grade1' ||
             cfg.toleranceGrade === 'grade2' ||
             cfg.toleranceGrade === 'grade3'
               ? cfg.toleranceGrade
-              : prev.toleranceGrade,
-          startStationName: cfg.startStationName?.trim() || prev.startStationName,
-          startOrientName: cfg.startOrientName?.trim() || prev.startOrientName,
-          endStationName: cfg.endStationName?.trim() || prev.endStationName,
-          endOrientName: cfg.endOrientName?.trim() || prev.endOrientName,
-        }));
+              : curTrCfg.toleranceGrade,
+          startStationName: cfg.startStationName?.trim() || curTrCfg.startStationName,
+          startOrientName: cfg.startOrientName?.trim() || curTrCfg.startOrientName,
+          endStationName: cfg.endStationName?.trim() || curTrCfg.endStationName,
+          endOrientName: cfg.endOrientName?.trim() || curTrCfg.endOrientName,
+        };
+        traverseConfigRef.current = nextTrCfg;
+        setTraverseConfig(nextTrCfg);
       }
       const converted = convertAiTraverseRows(action.payload, traverseConfigRef.current.miaUnit);
       if (converted.length === 0) return '';
       const mode = action.payload.mode === 'replace' ? 'replace' : 'append';
-      setTraverseRows((prev) => (mode === 'replace' ? converted : [...prev, ...converted]));
+      const nextTraverse = mode === 'replace' ? converted : [...traverseRowsRef.current, ...converted];
+      traverseRowsRef.current = nextTraverse;
+      setTraverseRows(nextTraverse);
+      activeTabRef.current = 'traverse';
       setActiveTab('traverse');
       const label = `Đã ${mode === 'replace' ? 'thay thế' : 'thêm'} ${converted.length} trạm đo 2 mặt vào Tab 2 & tự bình sai`;
       showNotice(`Trợ lý AI: ${label}.`);
@@ -667,7 +664,7 @@ export default function App() {
           defaultStation: unifiedStations[1]?.name || unifiedStations[0]?.name || 'M1',
           defaultOrient: unifiedStations[0]?.name || 'M0',
           defaultVertMode: activeVertMode,
-          existingCount: detailRows.length,
+          existingCount: detailRowsRef.current.length,
         }
       );
       if (converted.length === 0) return '';
@@ -676,7 +673,10 @@ export default function App() {
         setDetailVertMode(detectedVerticalMode);
       }
       const mode = action.payload.mode === 'replace' ? 'replace' : 'append';
-      setDetailRows((prev) => (mode === 'replace' ? converted : [...prev, ...converted]));
+      const nextDetail = mode === 'replace' ? converted : [...detailRowsRef.current, ...converted];
+      detailRowsRef.current = nextDetail;
+      setDetailRows(nextDetail);
+      activeTabRef.current = 'detail';
       setActiveTab('detail');
       const label = `Đã ${mode === 'replace' ? 'thay thế' : 'thêm'} ${converted.length} điểm đo vào Tab 3 (Sổ đo chi tiết)`;
       showNotice(`Trợ lý AI: ${label}.`);
@@ -699,7 +699,7 @@ export default function App() {
 
     const newRow: DetailSurveyRow = {
       id: `ai-dt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      pointName: p.pointName || `P${detailRows.length + 1}`,
+      pointName: p.pointName || `P${detailRowsRef.current.length + 1}`,
       stationName: p.stationName || 'M1',
       orientName: p.orientName || 'M0',
       instrumentHeight: Number(iVal.toFixed(3)),
@@ -713,7 +713,10 @@ export default function App() {
       note: p.note || 'Nhập qua Trợ lý AI',
     };
 
-    setDetailRows((prev) => [...prev, newRow]);
+    const nextDetail = [...detailRowsRef.current, newRow];
+    detailRowsRef.current = nextDetail;
+    setDetailRows(nextDetail);
+    activeTabRef.current = 'detail';
     setActiveTab('detail');
     showNotice(`Trợ lý AI đã thêm điểm ${newRow.pointName} vào Tab 3 (Sổ đo chi tiết).`);
     return `Đã thêm điểm ${newRow.pointName} (Trạm ${newRow.stationName} → ĐH ${newRow.orientName}) vào Sổ đo chi tiết`;

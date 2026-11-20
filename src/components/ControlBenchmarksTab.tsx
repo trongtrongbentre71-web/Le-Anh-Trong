@@ -42,7 +42,6 @@ export const ControlBenchmarksTab: React.FC<ControlBenchmarksTabProps> = ({
   };
 
   const handleDelete = (id: string) => {
-    if (controlPoints.length <= 1) return;
     onChangeControlPoints(controlPoints.filter((cp) => cp.id !== id));
   };
 
@@ -145,15 +144,21 @@ export const ControlBenchmarksTab: React.FC<ControlBenchmarksTabProps> = ({
                     <button
                       type="button"
                       onClick={() => handleDelete(cp.id)}
-                      disabled={controlPoints.length <= 1}
                       aria-label={`Xóa mốc ${cp.name}`}
-                      className="inline-flex h-7 w-7 items-center justify-center rounded text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-30"
+                      className="inline-flex h-7 w-7 items-center justify-center rounded text-slate-400 hover:bg-red-50 hover:text-red-600"
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>
                   </td>
                 </tr>
               ))}
+              {controlPoints.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="px-4 py-8 text-center text-xs text-slate-400">
+                    Chưa có mốc khống chế gốc nào. Bấm "Thêm mốc gốc" hoặc yêu cầu Trợ lý AI nhập từ đề bài / khôi phục dữ liệu mẫu.
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
