@@ -1,6 +1,7 @@
 import React, { useMemo, useRef, useState } from 'react';
 import {
   BookOpen,
+  Camera,
   Cloud,
   FileSpreadsheet,
   Upload,
@@ -41,6 +42,7 @@ import { MapAndExportTab } from './components/MapAndExportTab';
 import { AiAssistantSidebar } from './components/AiAssistantSidebar';
 import { InstrumentGuideModal } from './components/InstrumentGuideModal';
 import { GoogleSheetsModal } from './components/GoogleSheetsModal';
+import { CameraScannerModal } from './components/CameraScannerModal';
 
 type TabKey = 'control' | 'traverse' | 'detail' | 'height' | 'map';
 
@@ -72,6 +74,7 @@ export default function App() {
   const [aiOpen, setAiOpen] = useState<boolean>(true);
   const [guideOpen, setGuideOpen] = useState<boolean>(false);
   const [sheetsOpen, setSheetsOpen] = useState<boolean>(false);
+  const [cameraOpen, setCameraOpen] = useState<boolean>(false);
   const [notice, setNotice] = useState<string | null>(null);
 
   const quickFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -346,6 +349,15 @@ export default function App() {
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
+              onClick={() => setCameraOpen(true)}
+              className="inline-flex items-center gap-1.5 rounded-md bg-[#1E3A5F] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#162C49] whitespace-nowrap"
+            >
+              <Camera className="h-3.5 w-3.5 text-teal-300" />
+              Chụp số liệu (Camera)
+            </button>
+
+            <button
+              type="button"
               onClick={() => setSheetsOpen(true)}
               className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-[#1E3A5F] hover:bg-slate-50 whitespace-nowrap"
             >
@@ -454,6 +466,7 @@ export default function App() {
               onChangeVerticalMode={setDetailVertMode}
               onChangeRows={setDetailRows}
               onOpenGuide={() => setGuideOpen(true)}
+              onOpenCamera={() => setCameraOpen(true)}
             />
           )}
 
@@ -480,6 +493,41 @@ export default function App() {
 
       {/* Visual Illustrated Instrument & Stadia Simulator Modal */}
       <InstrumentGuideModal open={guideOpen} onClose={() => setGuideOpen(false)} />
+
+      {/* Field Camera AI OCR Scanner Modal */}
+      <CameraScannerModal
+        open={cameraOpen}
+        onClose={() => setCameraOpen(false)}
+        availableStations={unifiedStations}
+        detailUnits={detailUnits}
+        detailVertMode={detailVertMode}
+        traverseMiaUnit={traverseConfig.miaUnit}
+        existingDetailCount={detailRows.length}
+        onImportDetailRows={(newRows, detectedMode) => {
+          if (detectedMode && detectedMode !== detailVertMode) {
+            setDetailVertMode(detectedMode);
+          }
+          setDetailRows((prev) => [...prev, ...newRows]);
+          setActiveTab('detail');
+          showNotice(
+            `Camera AI đã quét và nhập ${newRows.length} điểm đo vào Tab 3 (Sổ đo chi tiết).`
+          );
+        }}
+        onImportControlPoints={(newCps) => {
+          setControlPoints((prev) => [...prev, ...newCps]);
+          setActiveTab('control');
+          showNotice(
+            `Camera AI đã quét và nhập ${newCps.length} mốc khống chế gốc vào Tab 1 (Mốc gốc).`
+          );
+        }}
+        onImportTraverseRows={(newTrs) => {
+          setTraverseRows((prev) => [...prev, ...newTrs]);
+          setActiveTab('traverse');
+          showNotice(
+            `Camera AI đã quét và nhập ${newTrs.length} trạm đo 2 mặt vào Tab 2 (Đường chuyền 2 mặt).`
+          );
+        }}
+      />
 
       {/* Two-Way Google Sheets Sync Modal */}
       <GoogleSheetsModal

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Plus, Trash2, AlertTriangle, CheckCircle2, BookOpen } from 'lucide-react';
+import { Plus, Trash2, AlertTriangle, CheckCircle2, BookOpen, Camera } from 'lucide-react';
 import type {
   ComputedDetailRow,
   DetailSurveyRow,
@@ -24,6 +24,7 @@ interface DetailSurveyTabProps {
   onChangeVerticalMode: (mode: VerticalCircleMode) => void;
   onChangeRows: (next: DetailSurveyRow[]) => void;
   onOpenGuide: () => void;
+  onOpenCamera?: () => void;
 }
 
 const UNIT_OPTIONS: LengthUnit[] = ['m', 'dm', 'cm', 'mm'];
@@ -40,6 +41,7 @@ export const DetailSurveyTab: React.FC<DetailSurveyTabProps> = ({
   onChangeVerticalMode,
   onChangeRows,
   onOpenGuide,
+  onOpenCamera,
 }) => {
   const handleAddRow = () => {
     const last = rows[rows.length - 1];
@@ -115,7 +117,17 @@ export const DetailSurveyTab: React.FC<DetailSurveyTabProps> = ({
               </span>
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {onOpenCamera && (
+              <button
+                type="button"
+                onClick={onOpenCamera}
+                className="inline-flex items-center gap-1.5 rounded-md border border-[#1E3A5F] bg-white px-3 py-1.5 text-xs font-semibold text-[#1E3A5F] hover:bg-slate-50 whitespace-nowrap"
+              >
+                <Camera className="h-3.5 w-3.5 text-[#0F766E]" />
+                Quét Camera AI
+              </button>
+            )}
             <button
               type="button"
               onClick={onOpenGuide}

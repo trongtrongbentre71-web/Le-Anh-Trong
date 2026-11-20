@@ -1,6 +1,6 @@
 {
   "name": "GEOSURVEY PRO — Sổ Đo Kinh Vĩ & Bình Đồ Tự Động",
   "description": "Ứng dụng web chuyên ngành Trắc địa Công trình & Bản đồ tích hợp bình sai đường chuyền kinh vĩ 2 mặt, sổ đo chi tiết chuyền trạm, đo chiều cao công trình, bình đồ 2D, xuất AutoCAD/Civil 3D/WPS Excel, đồng bộ Google Sheets và Trợ lý AI Trắc địa.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": ["camera"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

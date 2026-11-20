@@ -251,7 +251,206 @@ async function generateWithResilience(
 
 async function createServer() {
   const app = express();
-  app.use(express.json({ limit: '4mb' }));
+  app.use(express.json({ limit: '12mb' }));
+
+  const surveyOcrSchema = {
+    type: Type.OBJECT,
+    properties: {
+      detectedType: {
+        type: Type.STRING,
+        description:
+          'Loại số liệu nhận diện được trong ảnh: "detail" (sổ đo chi tiết hoặc màn hình máy kinh vĩ/toàn đạc), "control" (bảng tọa độ mốc gốc X, Y, H), "traverse" (sổ đo đường chuyền 2 mặt L/R), hoặc "unknown" nếu ảnh không chứa số liệu trắc địa.',
+      },
+      sourceDescription: {
+        type: Type.STRING,
+        description:
+          'Mô tả ngắn gọn nguồn ảnh (ví dụ: "Sổ đo chi tiết viết tay (3 điểm)", "Màn hình LCD máy kinh vĩ điện tử", "Bảng tọa độ mốc khống chế").',
+      },
+      warnings: {
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
+        description:
+          'Danh sách cảnh báo tiếng Việt nếu có chữ số mờ, thiếu chỉ mia, hoặc giá trị cần kỹ sư kiểm tra lại.',
+      },
+      detailRows: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            pointName: { type: Type.STRING },
+            stationName: { type: Type.STRING },
+            orientName: { type: Type.STRING },
+            instrumentHeightM: { type: Type.NUMBER },
+            hzOrientStr: { type: Type.STRING },
+            hzPointStr: { type: Type.STRING },
+            vertAngleStr: { type: Type.STRING },
+            verticalMode: { type: Type.STRING },
+            miaAMm: { type: Type.NUMBER },
+            miaLMm: { type: Type.NUMBER },
+            miaBMm: { type: Type.NUMBER },
+            kind: { type: Type.STRING },
+            note: { type: Type.STRING },
+          },
+          required: ['pointName', 'hzPointStr', 'vertAngleStr'],
+        },
+      },
+      controlPoints: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            name: { type: Type.STRING },
+            x: { type: Type.NUMBER },
+            y: { type: Type.NUMBER },
+            h: { type: Type.NUMBER },
+            note: { type: Type.STRING },
+          },
+          required: ['name', 'x', 'y', 'h'],
+        },
+      },
+      traverseRows: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            stationName: { type: Type.STRING },
+            targetName: { type: Type.STRING },
+            instrumentHeightM: { type: Type.NUMBER },
+            hzBackLStr: { type: Type.STRING },
+            hzForeLStr: { type: Type.STRING },
+            hzBackRStr: { type: Type.STRING },
+            hzForeRStr: { type: Type.STRING },
+            vertLStr: { type: Type.STRING },
+            vertRStr: { type: Type.STRING },
+            miaAMm: { type: Type.NUMBER },
+            miaLMm: { type: Type.NUMBER },
+            miaBMm: { type: Type.NUMBER },
+          },
+          required: ['stationName', 'targetName'],
+        },
+      },
+    },
+    required: ['detectedType', 'sourceDescription', 'warnings', 'detailRows', 'controlPoints', 'traverseRows'],
+  };
+
+  app.post('/api/gemini/ocr-survey', async (req, res) => {
+    try {
+      const {
+        imageBase64,
+        mimeType = 'image/jpeg',
+        targetMode = 'auto',
+        defaults = {},
+      } = req.body as {
+        imageBase64?: string;
+        mimeType?: string;
+        targetMode?: string;
+        defaults?: {
+          defaultStation?: string;
+          defaultOrient?: string;
+          defaultInstrumentHeightM?: number;
+          defaultVerticalMode?: string;
+          availableStations?: string[];
+        };
+      };
+
+      if (!imageBase64 || typeof imageBase64 !== 'string' || imageBase64.length < 64) {
+        res.status(400).json({ error: 'Chưa có dữ liệu ảnh hợp lệ để quét.', retryable: false });
+        return;
+      }
+
+      const ai = getGeminiClient();
+      const targetHint =
+        targetMode === 'detail'
+          ? 'Người dùng chỉ định quét thành SỔ ĐO CHI TIẾT (detailRows).'
+          : targetMode === 'control'
+            ? 'Người dùng chỉ định quét thành BẢNG MỐC KHỐNG CHẾ GỐC (controlPoints).'
+            : targetMode === 'traverse'
+              ? 'Người dùng chỉ định quét thành SỔ ĐO ĐƯỜNG CHUYỀN 2 MẶT L/R (traverseRows).'
+              : 'Tự động nhận diện xem ảnh là sổ đo chi tiết / màn hình máy kinh vĩ (detail), bảng tọa độ mốc gốc (control), hay sổ đo đường chuyền 2 mặt L/R (traverse).';
+
+      const promptText = `Bạn là chuyên gia Trắc địa công trình & OCR số liệu đo đạc thực địa Việt Nam.
+Hãy đọc CHÍNH XÁC mọi số liệu trắc địa trong ảnh chụp (có thể là sổ đo viết tay, bảng in, bảng phấn/giấy công trường, hoặc màn hình LCD máy kinh vĩ điện tử / toàn đạc điện tử).
+
+YÊU CẦU CHẾ ĐỘ QUÉT:
+${targetHint}
+
+THÔNG SỐ MẶC ĐỊNH CỦA TRẠM ĐANG ĐẶT MÁY (chỉ dùng điền vào chỗ bị thiếu trên ảnh, ví dụ khi chụp màn hình LCD máy chỉ hiện góc Hz và V/Z):
+- Trạm máy mặc định: ${defaults.defaultStation || 'M1'}
+- Điểm định hướng mặc định: ${defaults.defaultOrient || 'M0'}
+- Chiều cao máy i mặc định: ${defaults.defaultInstrumentHeightM ?? 1.48} m
+- Hệ góc đứng mặc định: ${defaults.defaultVerticalMode || 'Z'}
+- Các trạm hiện có trong sổ: ${(defaults.availableStations || ['M0', 'M1']).join(', ')}
+
+QUY TẮC CHUẨN HÓA SỐ LIỆU:
+1. Góc DMS định dạng chuẩn kiểu 45°20'10" hoặc -0°15'20" (nếu góc đứng âm quanh 0° thì giữ dấu trừ -0° và đặt verticalMode="V"; nếu góc quanh 80°..100° đặt verticalMode="Z").
+2. Chỉ mia a (chỉ trên), l (chỉ giữa), b (chỉ dưới) PHẢI quy đổi ra MILIMÉT (mm) — ví dụ ghi 1.850 m -> 1850; ghi 1850 -> 1850. Đảm bảo a >= l >= b.
+3. Nếu ảnh là màn hình máy toàn đạc/kinh vĩ chỉ hiện góc Hz, V/Z và khoảng cách HD/SD (không ghi 3 chỉ mia), hãy giữ nguyên Hz, V/Z, đặt miaLMm = 1500 và suy ra miaAMm = 1500 + round(HD*5), miaBMm = 1500 - round(HD*5) để công thức D = 100*(a-b) khớp khoảng cách HD, ĐỒNG THỜI ghi rõ vào mảng warnings để kỹ sư biết.
+4. Nếu ảnh mờ, mất chữ hoặc không phải số liệu trắc địa, KHÔNG tự bịa số liệu — hãy trả detectedType="unknown" (nếu không có số đo nào) và nêu rõ lý do trong warnings.`;
+
+      const attempts: Array<{ model: string; delayBeforeMs: number }> = [
+        { model: PRIMARY_MODEL, delayBeforeMs: 0 },
+        { model: FALLBACK_MODEL, delayBeforeMs: 400 },
+        { model: FALLBACK_MODEL, delayBeforeMs: 1000 },
+      ];
+
+      let lastErr: unknown;
+      let responseText = '';
+
+      for (let i = 0; i < attempts.length; i++) {
+        const { model, delayBeforeMs } = attempts[i];
+        if (delayBeforeMs > 0) await sleep(delayBeforeMs);
+
+        try {
+          const response = await withTimeout(
+            ai.models.generateContent({
+              model,
+              contents: {
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType,
+                      data: imageBase64,
+                    },
+                  },
+                  { text: promptText },
+                ],
+              },
+              config: {
+                responseMimeType: 'application/json',
+                responseSchema: surveyOcrSchema,
+                ...(model === PRIMARY_MODEL
+                  ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+                  : {}),
+              },
+            }),
+            18000,
+            `ocr-${model}`
+          );
+          responseText = (response.text || '').trim();
+          if (responseText) break;
+        } catch (err) {
+          lastErr = err;
+          const check = isTransientError(err);
+          console.warn(
+            `Gemini OCR attempt ${i + 1}/${attempts.length} (${model}) failed [${check.statusCode}]: ${check.rawMessage.slice(0, 180)}`
+          );
+          if (!check.transient) throw err;
+        }
+      }
+
+      if (!responseText) {
+        throw lastErr || new Error('Không nhận được kết quả đọc ảnh từ AI.');
+      }
+
+      const parsed = JSON.parse(responseText) as Record<string, unknown>;
+      res.json(parsed);
+    } catch (error: unknown) {
+      const check = isTransientError(error);
+      console.error('Gemini OCR final error:', check.rawMessage);
+      const friendly = formatServerErrorMessage(check.rawMessage, check.statusCode);
+      res.status(check.statusCode >= 400 ? check.statusCode : 500).json(friendly);
+    }
+  });
 
   app.post('/api/gemini/chat', async (req, res) => {
     try {
@@ -272,6 +471,7 @@ async function createServer() {
 
 CẤU TRÚC ỨNG DỤNG GEOSURVEY PRO (để hướng dẫn người dùng mới dễ hiểu khi họ hỏi cách sử dụng web):
 - Nút "Hướng dẫn Máy & Mia" (góc trên phải): Mở mô phỏng trực quan ống kính kinh vĩ & mia chữ E, kéo thanh trượt xem cách đọc Chỉ trên (a), Chỉ giữa (l), Chỉ dưới (b), Chỉ đứng, đo 2 mặt L/R và 6 bước đặt máy.
+- Nút "Chụp số liệu (Camera)" (trên thanh công cụ): Mở camera trực tiếp ngoài công trình hoặc chọn ảnh có sẵn để chụp sổ đo viết tay, màn hình LCD máy kinh vĩ/toàn đạc, hoặc bảng tọa độ mốc gốc — AI tự bóc tách góc Hz, Z/V, 3 chỉ mia a/l/b và nhập thẳng vào Tab 1, Tab 2 hoặc Tab 3.
 - Tab 1 (Mốc gốc): Nhập danh sách mốc khống chế gốc M0, M1 (X Bắc, Y Đông, Cao độ H) và xem bảng tổng hợp mọi trạm khả dụng.
 - Tab 2 (Đường chuyền 2 mặt): Nhập số đo Thuận kính L / Đảo kính R, tự tính 2C, MO, α_TB, kiểm tra hạn sai ĐẠT/VƯỢT và tự bình sai Bowditch ra tọa độ trạm mới (T1, T2, T3...).
 - Tab 3 (Sổ đo chi tiết): Chọn đơn vị m/dm/cm/mm, bật hiệu chỉnh độ cong Trái Đất f_ck (≥150m), nhập góc Hz, Z/V (hỗ trợ -0°), 3 chỉ mia a/l/b; tự kiểm tra sai số mia (xanh ≤2mm, đỏ >2mm) và hỗ trợ chuyền trạm liên tục khi chọn Loại điểm = "Trạm chuyền".
