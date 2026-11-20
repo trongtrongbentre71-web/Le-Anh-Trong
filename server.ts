@@ -2,7 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { GoogleGenAI, Type, type FunctionDeclaration } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type, type FunctionDeclaration } from '@google/genai';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -99,6 +99,156 @@ const addDetailPointTool: FunctionDeclaration = {
   },
 };
 
+const PRIMARY_MODEL = 'gemini-4-hydrogen';
+const FALLBACK_MODEL = 'gemini-3.1-flash-lite';
+
+function isTransientError(err: unknown): { transient: boolean; statusCode: number; rawMessage: string } {
+  const rawMessage = err instanceof Error ? err.message : String(err ?? '');
+  const lower = rawMessage.toLowerCase();
+  const statusFromObj =
+    typeof err === 'object' && err !== null && 'status' in err && typeof (err as { status?: unknown }).status === 'number'
+      ? (err as { status: number }).status
+      : 0;
+
+  if (
+    statusFromObj === 503 ||
+    lower.includes('503') ||
+    lower.includes('unavailable') ||
+    lower.includes('high demand') ||
+    lower.includes('overloaded')
+  ) {
+    return { transient: true, statusCode: 503, rawMessage };
+  }
+
+  if (statusFromObj === 429 || lower.includes('429') || lower.includes('resource_exhausted')) {
+    return { transient: true, statusCode: 429, rawMessage };
+  }
+
+  if (
+    statusFromObj === 500 ||
+    statusFromObj === 502 ||
+    statusFromObj === 504 ||
+    lower.includes('deadline_exceeded') ||
+    lower.includes('econnreset') ||
+    lower.includes('fetch failed')
+  ) {
+    return { transient: true, statusCode: statusFromObj || 503, rawMessage };
+  }
+
+  return { transient: false, statusCode: statusFromObj || 500, rawMessage };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatServerErrorMessage(rawMessage: string, statusCode: number): {
+  error: string;
+  retryable: boolean;
+} {
+  const lower = rawMessage.toLowerCase();
+  if (statusCode === 503 || lower.includes('unavailable') || lower.includes('high demand')) {
+    return {
+      error:
+        'Máy chủ AI đang tạm thời quá tải lưu lượng. Hệ thống đã tự động thử lại và chuyển dự phòng nhưng vẫn bận — vui lòng bấm "Thử lại" sau vài giây.',
+      retryable: true,
+    };
+  }
+  if (statusCode === 429 || lower.includes('resource_exhausted') || lower.includes('quota')) {
+    return {
+      error:
+        'Đã tạm chạm giới hạn lượt gọi AI. Vui lòng đợi 15–30 giây rồi bấm "Thử lại" hoặc kiểm tra API Key trong Settings > Secrets.',
+      retryable: true,
+    };
+  }
+  if (
+    statusCode === 401 ||
+    statusCode === 403 ||
+    lower.includes('api_key_invalid') ||
+    lower.includes('permission_denied') ||
+    lower.includes('chưa được cấu hình')
+  ) {
+    return {
+      error:
+        'Khóa GEMINI_API_KEY chưa hợp lệ hoặc chưa được thiết lập. Vui lòng kiểm tra lại trong Settings > Secrets.',
+      retryable: false,
+    };
+  }
+  return {
+    error: 'Trợ lý AI gặp sự cố kết nối tạm thời. Vui lòng bấm "Thử lại".',
+    retryable: true,
+  };
+}
+
+const PER_ATTEMPT_TIMEOUT_MS = 14000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`DEADLINE_EXCEEDED: ${label} timed out after ${ms}ms`));
+    }, ms);
+    promise
+      .then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+}
+
+async function generateWithResilience(
+  ai: GoogleGenAI,
+  contents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }>,
+  systemInstruction: string
+) {
+  const attempts: Array<{ model: string; delayBeforeMs: number }> = [
+    { model: PRIMARY_MODEL, delayBeforeMs: 0 },
+    { model: PRIMARY_MODEL, delayBeforeMs: 600 },
+    { model: FALLBACK_MODEL, delayBeforeMs: 300 },
+    { model: FALLBACK_MODEL, delayBeforeMs: 900 },
+  ];
+
+  let lastErr: unknown;
+
+  for (let i = 0; i < attempts.length; i++) {
+    const { model, delayBeforeMs } = attempts[i];
+    if (delayBeforeMs > 0) await sleep(delayBeforeMs);
+
+    try {
+      const response = await withTimeout(
+        ai.models.generateContent({
+          model,
+          contents,
+          config: {
+            systemInstruction,
+            tools: [{ functionDeclarations: [addDetailPointTool] }],
+            ...(model === PRIMARY_MODEL
+              ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+              : {}),
+          },
+        }),
+        PER_ATTEMPT_TIMEOUT_MS,
+        model
+      );
+      return { response, usedModel: model };
+    } catch (err) {
+      lastErr = err;
+      const check = isTransientError(err);
+      console.warn(
+        `Gemini attempt ${i + 1}/${attempts.length} (${model}) failed [${check.statusCode}]: ${check.rawMessage.slice(0, 180)}`
+      );
+      if (!check.transient) {
+        throw err;
+      }
+    }
+  }
+
+  throw lastErr;
+}
+
 async function createServer() {
   const app = express();
   app.use(express.json({ limit: '4mb' }));
@@ -111,39 +261,55 @@ async function createServer() {
         surveyContext?: Record<string, unknown>;
       };
 
-      if (!message || typeof message !== 'string') {
-        res.status(400).json({ error: 'Tin nhắn không hợp lệ.' });
+      if (!message || typeof message !== 'string' || !message.trim()) {
+        res.status(400).json({ error: 'Tin nhắn không hợp lệ.', retryable: false });
         return;
       }
 
       const ai = getGeminiClient();
 
-      const systemInstruction = `Bạn là Trợ lý AI Kỹ sư Trắc địa Công trình cao cấp tích hợp trong phần mềm GEOSURVEY PRO (chuyên ngành Trắc địa công trình, Bản đồ địa hình, Tiêu chuẩn Việt Nam TCVN 9401:2012 & TCVN 9398:2012).
-Phong cách trả lời:
-- Tiếng Việt kỹ thuật chuẩn xác, súc tích, dễ tra cứu (dùng danh sách rõ ràng, đơn vị m / mm / giây góc).
-- Luôn căn cứ trực tiếp vào SỐ LIỆU THỰC TẾ hiện có của khu đo được cung cấp trong ngữ cảnh bên dưới.
-- Khi kiểm tra sai số: rà soát tất cả các điểm chi tiết có |sai số mia| > 2mm (tính từ ((a+b)/2 - l)), các trạm đường chuyền có 2C lớn hoặc sai số khép góc f_β / tọa độ f_s / cao độ f_h vượt hạn sai, giải thích nguyên nhân (đọc nhầm vạch cm/dm trên mia chữ E, bọt thủy lệch, ngắm sai điểm định hướng) và đề xuất phương án xử lý ngoài thực địa.
-- Khi người dùng yêu cầu thêm/nhập điểm đo mới bằng ngôn ngữ tự nhiên, HÃY GỌI HÀM addDetailPoint với các thông số đã bóc tách chính xác (quy đổi chỉ mia về mm nếu nhập bằng m, ví dụ 1.85m -> 1850mm; mặc định Hz_ĐH = "0°00'00\"" nếu không nêu rõ; nếu Z khoảng 70-110° thì verticalMode="Z", nếu góc nhỏ quanh 0° thì verticalMode="V").
+      const systemInstruction = `Bạn là Trợ lý AI Kỹ sư Trắc địa Công trình tích hợp trong ứng dụng web GEOSURVEY PRO (chuyên ngành Trắc địa công trình, Bản đồ địa hình, Tiêu chuẩn Việt Nam TCVN 9401:2012 & TCVN 9398:2012).
+
+CẤU TRÚC ỨNG DỤNG GEOSURVEY PRO (để hướng dẫn người dùng mới dễ hiểu khi họ hỏi cách sử dụng web):
+- Nút "Hướng dẫn Máy & Mia" (góc trên phải): Mở mô phỏng trực quan ống kính kinh vĩ & mia chữ E, kéo thanh trượt xem cách đọc Chỉ trên (a), Chỉ giữa (l), Chỉ dưới (b), Chỉ đứng, đo 2 mặt L/R và 6 bước đặt máy.
+- Tab 1 (Mốc gốc): Nhập danh sách mốc khống chế gốc M0, M1 (X Bắc, Y Đông, Cao độ H) và xem bảng tổng hợp mọi trạm khả dụng.
+- Tab 2 (Đường chuyền 2 mặt): Nhập số đo Thuận kính L / Đảo kính R, tự tính 2C, MO, α_TB, kiểm tra hạn sai ĐẠT/VƯỢT và tự bình sai Bowditch ra tọa độ trạm mới (T1, T2, T3...).
+- Tab 3 (Sổ đo chi tiết): Chọn đơn vị m/dm/cm/mm, bật hiệu chỉnh độ cong Trái Đất f_ck (≥150m), nhập góc Hz, Z/V (hỗ trợ -0°), 3 chỉ mia a/l/b; tự kiểm tra sai số mia (xanh ≤2mm, đỏ >2mm) và hỗ trợ chuyền trạm liên tục khi chọn Loại điểm = "Trạm chuyền".
+- Tab 4 (Đo cao & Tra cứu): Đo chiều cao tòa nhà tiếp cận được chân, giao hội đứng 2 trạm thẳng hàng A-B cho nhà cao tầng không tới được chân, và tra cứu khoảng cách/chênh cao/độ dốc giữa 2 điểm bất kỳ.
+- Tab 5 (Bình đồ & Xuất file): Xem bản đồ 2D tương tác (Zoom/Pan, click 2 điểm đo nhanh), biểu đồ trắc dọc Cao độ H, xuất/nhập Excel chuẩn WPS Office (.xlsx, .csv Civil 3D), xuất AutoCAD (.scr) và đồng bộ 2 chiều Google Sheets.
+
+PHONG CÁCH TRẢ LỜI:
+- Tiếng Việt kỹ thuật rõ ràng, thân thiện, chia mục ngắn gọn dễ đọc.
+- Luôn căn cứ vào SỐ LIỆU THỰC TẾ của khu đo hiện tại trong JSON bên dưới khi kiểm tra sai số, tính cao độ/độ dốc/san nền.
+- Khi người dùng yêu cầu thêm/nhập điểm đo mới bằng ngôn ngữ tự nhiên, HÃY GỌI HÀM addDetailPoint với các thông số đã bóc tách chính xác (quy đổi chỉ mia về mm nếu nhập bằng m, ví dụ 1.85m -> 1850mm; mặc định Hz_ĐH = "0°00'00\"" nếu không nêu rõ; Z ~ 90° -> verticalMode="Z", góc quanh 0° -> verticalMode="V").
 
 DỮ LIỆU KHU ĐO HIỆN TẠI (JSON):
 ${JSON.stringify(surveyContext)}`;
 
+      // Build clean alternating conversation history (no empty turns or consecutive identical roles)
+      const normalizedHistory: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
+      for (const h of history.slice(-8)) {
+        const text = typeof h?.text === 'string' ? h.text.trim() : '';
+        if (!text) continue;
+        const role: 'user' | 'model' = h.role === 'assistant' ? 'model' : 'user';
+        if (normalizedHistory.length === 0 && role === 'model') continue;
+        if (normalizedHistory.length > 0 && normalizedHistory[normalizedHistory.length - 1].role === role) {
+          normalizedHistory[normalizedHistory.length - 1].parts[0].text += `\n${text}`;
+        } else {
+          normalizedHistory.push({ role, parts: [{ text }] });
+        }
+      }
+      // Ensure last history item is not 'user' right before appending current user message
+      if (normalizedHistory.length > 0 && normalizedHistory[normalizedHistory.length - 1].role === 'user') {
+        normalizedHistory.pop();
+      }
+
       const contents = [
-        ...history.slice(-8).map((h) => ({
-          role: h.role === 'assistant' ? 'model' : 'user',
-          parts: [{ text: h.text }],
-        })),
-        { role: 'user', parts: [{ text: message }] },
+        ...normalizedHistory,
+        { role: 'user' as const, parts: [{ text: message.trim() }] },
       ];
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
-        contents,
-        config: {
-          systemInstruction,
-          tools: [{ functionDeclarations: [addDetailPointTool] }],
-        },
-      });
+      const { response } = await generateWithResilience(ai, contents, systemInstruction);
 
       const actions: Array<{ type: string; payload: Record<string, unknown> }> = [];
       const functionCalls = response.functionCalls;
@@ -173,9 +339,10 @@ ${JSON.stringify(surveyContext)}`;
         actions,
       });
     } catch (error: unknown) {
-      const errMsg = error instanceof Error ? error.message : 'Lỗi không xác định khi gọi Trợ lý AI.';
-      console.error('Gemini chat error:', errMsg);
-      res.status(500).json({ error: errMsg });
+      const check = isTransientError(error);
+      console.error('Gemini chat final error:', check.rawMessage);
+      const friendly = formatServerErrorMessage(check.rawMessage, check.statusCode);
+      res.status(check.statusCode >= 400 ? check.statusCode : 500).json(friendly);
     }
   });
 
