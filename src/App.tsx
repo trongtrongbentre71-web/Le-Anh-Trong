@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   BookOpen,
   Camera,
@@ -10,10 +10,12 @@ import {
   X,
 } from 'lucide-react';
 import type {
-  AiActionAddDetail,
+  AiActionExportData,
+  AiSurveyAction,
   ControlPoint,
   DetailSurveyRow,
   DetailUnitSettings,
+  LengthUnit,
   MapPoint,
   TraverseConfig,
   TraverseRow,
@@ -30,10 +32,25 @@ import {
 import {
   computeDetailSurvey,
   computeTraverse,
+  generateAutoCadScript,
+  generateCivil3dCsv,
   metersToUnit,
   parseDmsString,
 } from './utils/geodesy';
-import { exportFullExcelWorkbook, importExcelOrCsvFile } from './utils/excelWps';
+import {
+  exportFullExcelWorkbook,
+  importExcelOrCsvFile,
+  triggerTextDownload,
+} from './utils/excelWps';
+import {
+  convertAiControlPoints,
+  convertAiDetailRows,
+  convertAiTraverseRows,
+  convertDetailRowsUnitChange,
+  convertTraverseRowsUnitChange,
+  matchNameInList,
+} from './utils/chatAttachments';
+import { normalizeInstrumentHeightM, normalizeMiaToMm } from './utils/cameraOcr';
 import { ControlBenchmarksTab } from './components/ControlBenchmarksTab';
 import { TraverseTab } from './components/TraverseTab';
 import { DetailSurveyTab } from './components/DetailSurveyTab';
@@ -76,8 +93,15 @@ export default function App() {
   const [sheetsOpen, setSheetsOpen] = useState<boolean>(false);
   const [cameraOpen, setCameraOpen] = useState<boolean>(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [pendingExport, setPendingExport] = useState<AiActionExportData['payload'] | null>(null);
 
   const quickFileInputRef = useRef<HTMLInputElement | null>(null);
+  const detailUnitsRef = useRef<DetailUnitSettings>(detailUnits);
+  const detailVertModeRef = useRef<VerticalCircleMode>(detailVertMode);
+  const traverseConfigRef = useRef<TraverseConfig>(traverseConfig);
+  detailUnitsRef.current = detailUnits;
+  detailVertModeRef.current = detailVertMode;
+  traverseConfigRef.current = traverseConfig;
 
   // 1. Compute Tab 2 Two-Face Traverse & Bowditch Adjustment
   const traverseSummary = useMemo(
@@ -225,14 +249,451 @@ export default function App() {
     }
   };
 
-  const handleExecuteAiAction = (action: AiActionAddDetail): string => {
-    const p = action.payload;
-    const miaA = metersToUnit((p.miaAMm || 1600) / 1000, detailUnits.miaUnit);
-    const miaL = metersToUnit((p.miaLMm || 1500) / 1000, detailUnits.miaUnit);
-    const miaB = metersToUnit((p.miaBMm || 1400) / 1000, detailUnits.miaUnit);
-    const iVal = metersToUnit(p.instrumentHeightM || 1.48, detailUnits.instrumentHeightUnit);
+  // Flush deferred AI export after React commits any chained edits/deletes/imports in the same turn
+  useEffect(() => {
+    if (!pendingExport) return;
+    const { format, cadTextHeight } = pendingExport;
+    setPendingExport(null);
 
-    if (p.verticalMode && p.verticalMode !== detailVertMode) {
+    const dateTag = new Date().toISOString().slice(0, 10);
+    if (format === 'excel_wps') {
+      exportFullExcelWorkbook({
+        controlPoints,
+        traverseSummary,
+        detailRows: detailComputed.computedRows,
+        allMapPoints,
+      });
+      showNotice('Trợ lý AI đã xuất file Excel (.xlsx) chuẩn WPS Spreadsheets.');
+    } else if (format === 'civil3d_csv') {
+      const csv = generateCivil3dCsv(allMapPoints, true);
+      triggerTextDownload(csv, `GEOSURVEY_Civil3D_PENZD_${dateTag}.csv`, 'text/csv;charset=utf-8');
+      showNotice('Trợ lý AI đã xuất file CSV Civil 3D (P,E,N,Z,D có UTF-8 BOM).');
+    } else if (format === 'autocad_scr') {
+      const scr = generateAutoCadScript(allMapPoints, cadTextHeight || 1.2);
+      triggerTextDownload(scr, `GEOSURVEY_AutoCAD_${dateTag}.scr`, 'text/plain;charset=utf-8');
+      showNotice(`Trợ lý AI đã xuất file Script AutoCAD (.scr, cao chữ ${cadTextHeight || 1.2}).`);
+    }
+  }, [pendingExport, controlPoints, traverseSummary, detailComputed.computedRows, allMapPoints]);
+
+  const handleExecuteAiAction = (action: AiSurveyAction): string => {
+    if (action.type === 'updateSettings') {
+      const p = action.payload;
+      const changes: string[] = [];
+      const validUnits: LengthUnit[] = ['m', 'dm', 'cm', 'mm'];
+
+      const curDetailUnits = detailUnitsRef.current;
+      const nextUnits: DetailUnitSettings = {
+        miaUnit: p.detailMiaUnit && validUnits.includes(p.detailMiaUnit) ? p.detailMiaUnit : curDetailUnits.miaUnit,
+        instrumentHeightUnit:
+          p.detailInstrumentHeightUnit && validUnits.includes(p.detailInstrumentHeightUnit)
+            ? p.detailInstrumentHeightUnit
+            : curDetailUnits.instrumentHeightUnit,
+        outputUnit:
+          p.detailOutputUnit && validUnits.includes(p.detailOutputUnit)
+            ? p.detailOutputUnit
+            : curDetailUnits.outputUnit,
+      };
+
+      const unitsChanged =
+        nextUnits.miaUnit !== curDetailUnits.miaUnit ||
+        nextUnits.instrumentHeightUnit !== curDetailUnits.instrumentHeightUnit ||
+        nextUnits.outputUnit !== curDetailUnits.outputUnit;
+
+      if (unitsChanged) {
+        if (p.convertExistingDetailValues !== false) {
+          setDetailRows((prev) => convertDetailRowsUnitChange(prev, curDetailUnits, nextUnits));
+        }
+        detailUnitsRef.current = nextUnits;
+        setDetailUnits(nextUnits);
+        changes.push(`Đơn vị Tab 3: mia=${nextUnits.miaUnit}, i=${nextUnits.instrumentHeightUnit}, xuất=${nextUnits.outputUnit}`);
+      }
+
+      if (p.detailVerticalMode === 'Z' || p.detailVerticalMode === 'V') {
+        detailVertModeRef.current = p.detailVerticalMode;
+        setDetailVertMode(p.detailVerticalMode);
+        changes.push(`Góc đứng Tab 3: ${p.detailVerticalMode}`);
+      }
+      if (typeof p.detailCurvatureEnabled === 'boolean') {
+        setDetailCurvature(p.detailCurvatureEnabled);
+        changes.push(`Hiệu chỉnh f_ck Tab 3: ${p.detailCurvatureEnabled ? 'Bật' : 'Tắt'}`);
+      }
+
+      const hasTraverseCfgChange =
+        p.traverseVerticalMode ||
+        p.traverseType ||
+        p.toleranceGrade ||
+        p.traverseMiaUnit ||
+        typeof p.traverseCurvatureEnabled === 'boolean' ||
+        p.startStationName ||
+        p.startOrientName ||
+        p.endStationName ||
+        p.endOrientName;
+
+      if (hasTraverseCfgChange) {
+        const curTrCfg = traverseConfigRef.current;
+        const nextTrMia =
+          p.traverseMiaUnit && validUnits.includes(p.traverseMiaUnit)
+            ? p.traverseMiaUnit
+            : curTrCfg.miaUnit;
+        if (nextTrMia !== curTrCfg.miaUnit) {
+          setTraverseRows((prev) => convertTraverseRowsUnitChange(prev, curTrCfg.miaUnit, nextTrMia));
+          changes.push(`Đơn vị mia Tab 2: ${nextTrMia}`);
+        }
+        const nextTrCfg: TraverseConfig = {
+          ...curTrCfg,
+          verticalMode:
+            p.traverseVerticalMode === 'Z' || p.traverseVerticalMode === 'V'
+              ? p.traverseVerticalMode
+              : curTrCfg.verticalMode,
+          traverseType:
+            p.traverseType === 'closed' || p.traverseType === 'connecting'
+              ? p.traverseType
+              : curTrCfg.traverseType,
+          toleranceGrade:
+            p.toleranceGrade === 'grade1' ||
+            p.toleranceGrade === 'grade2' ||
+            p.toleranceGrade === 'grade3'
+              ? p.toleranceGrade
+              : curTrCfg.toleranceGrade,
+          miaUnit: nextTrMia,
+          useCurvatureCorrection:
+            typeof p.traverseCurvatureEnabled === 'boolean'
+              ? p.traverseCurvatureEnabled
+              : curTrCfg.useCurvatureCorrection,
+          startStationName: p.startStationName?.trim() || curTrCfg.startStationName,
+          startOrientName: p.startOrientName?.trim() || curTrCfg.startOrientName,
+          endStationName: p.endStationName?.trim() || curTrCfg.endStationName,
+          endOrientName: p.endOrientName?.trim() || curTrCfg.endOrientName,
+        };
+        traverseConfigRef.current = nextTrCfg;
+        setTraverseConfig(nextTrCfg);
+        if (p.traverseType) changes.push(`Đường chuyền: ${p.traverseType === 'closed' ? 'Khép kín' : 'Phù hợp'}`);
+        if (p.toleranceGrade) changes.push(`Cấp hạng: ${p.toleranceGrade}`);
+        if (p.traverseVerticalMode) changes.push(`Góc đứng Tab 2: ${p.traverseVerticalMode}`);
+      }
+
+      if (changes.length === 0) return '';
+      const label = `Cập nhật cài đặt (${changes.join(' · ')})`;
+      showNotice(`Trợ lý AI: ${label}.`);
+      return label;
+    }
+
+    if (action.type === 'updatePoints') {
+      const p = action.payload;
+      const summaries: string[] = [];
+
+      if (Array.isArray(p.controlUpdates) && p.controlUpdates.length > 0) {
+        setControlPoints((prev) =>
+          prev.map((cp) => {
+            const upd = p.controlUpdates!.find(
+              (u) => u.name.trim().toLowerCase() === cp.name.trim().toLowerCase()
+            );
+            if (!upd) return cp;
+            return {
+              ...cp,
+              name: upd.newName?.trim() || cp.name,
+              x: typeof upd.x === 'number' && Number.isFinite(upd.x) ? Number(upd.x.toFixed(3)) : cp.x,
+              y: typeof upd.y === 'number' && Number.isFinite(upd.y) ? Number(upd.y.toFixed(3)) : cp.y,
+              h: typeof upd.h === 'number' && Number.isFinite(upd.h) ? Number(upd.h.toFixed(3)) : cp.h,
+              note: typeof upd.note === 'string' ? upd.note : cp.note,
+            };
+          })
+        );
+        summaries.push(`Sửa ${p.controlUpdates.length} mốc gốc (${p.controlUpdates.map((u) => u.name).join(', ')})`);
+      }
+
+      if (Array.isArray(p.detailUpdates) && p.detailUpdates.length > 0) {
+        const activeDetailUnits = detailUnitsRef.current;
+        setDetailRows((prev) =>
+          prev.map((row) => {
+            const upd = p.detailUpdates!.find(
+              (u) => u.pointName.trim().toLowerCase() === row.pointName.trim().toLowerCase()
+            );
+            if (!upd) return row;
+            return {
+              ...row,
+              pointName: upd.newPointName?.trim() || row.pointName,
+              stationName: upd.stationName?.trim() || row.stationName,
+              orientName: upd.orientName?.trim() || row.orientName,
+              instrumentHeight:
+                typeof upd.instrumentHeightM === 'number'
+                  ? Number(
+                      metersToUnit(
+                        normalizeInstrumentHeightM(upd.instrumentHeightM, 1.48),
+                        activeDetailUnits.instrumentHeightUnit
+                      ).toFixed(3)
+                    )
+                  : row.instrumentHeight,
+              hzOrient: upd.hzOrientStr ? parseDmsString(upd.hzOrientStr) : row.hzOrient,
+              hzPoint: upd.hzPointStr ? parseDmsString(upd.hzPointStr) : row.hzPoint,
+              vertAngle: upd.vertAngleStr ? parseDmsString(upd.vertAngleStr) : row.vertAngle,
+              miaA:
+                typeof upd.miaAMm === 'number'
+                  ? Number(metersToUnit(normalizeMiaToMm(upd.miaAMm, 1600) / 1000, activeDetailUnits.miaUnit).toFixed(3))
+                  : row.miaA,
+              miaL:
+                typeof upd.miaLMm === 'number'
+                  ? Number(metersToUnit(normalizeMiaToMm(upd.miaLMm, 1500) / 1000, activeDetailUnits.miaUnit).toFixed(3))
+                  : row.miaL,
+              miaB:
+                typeof upd.miaBMm === 'number'
+                  ? Number(metersToUnit(normalizeMiaToMm(upd.miaBMm, 1400) / 1000, activeDetailUnits.miaUnit).toFixed(3))
+                  : row.miaB,
+              kind: upd.kind === 'station' || upd.kind === 'detail' ? upd.kind : row.kind,
+              note: typeof upd.note === 'string' ? upd.note : row.note,
+            };
+          })
+        );
+        summaries.push(`Sửa ${p.detailUpdates.length} điểm chi tiết (${p.detailUpdates.map((u) => u.pointName).join(', ')})`);
+      }
+
+      if (Array.isArray(p.traverseUpdates) && p.traverseUpdates.length > 0) {
+        const activeTrMia = traverseConfigRef.current.miaUnit;
+        setTraverseRows((prev) =>
+          prev.map((row) => {
+            const upd = p.traverseUpdates!.find(
+              (u) => u.stationName.trim().toLowerCase() === row.stationName.trim().toLowerCase()
+            );
+            if (!upd) return row;
+            return {
+              ...row,
+              targetName: upd.targetName?.trim() || row.targetName,
+              instrumentHeight:
+                typeof upd.instrumentHeightM === 'number'
+                  ? normalizeInstrumentHeightM(upd.instrumentHeightM, row.instrumentHeight)
+                  : row.instrumentHeight,
+              hzBackL: upd.hzBackLStr ? parseDmsString(upd.hzBackLStr) : row.hzBackL,
+              hzForeL: upd.hzForeLStr ? parseDmsString(upd.hzForeLStr) : row.hzForeL,
+              hzBackR: upd.hzBackRStr ? parseDmsString(upd.hzBackRStr) : row.hzBackR,
+              hzForeR: upd.hzForeRStr ? parseDmsString(upd.hzForeRStr) : row.hzForeR,
+              vertL: upd.vertLStr ? parseDmsString(upd.vertLStr) : row.vertL,
+              vertR: upd.vertRStr ? parseDmsString(upd.vertRStr) : row.vertR,
+              miaA:
+                typeof upd.miaAMm === 'number'
+                  ? Number(metersToUnit(normalizeMiaToMm(upd.miaAMm, 1600) / 1000, activeTrMia).toFixed(3))
+                  : row.miaA,
+              miaL:
+                typeof upd.miaLMm === 'number'
+                  ? Number(metersToUnit(normalizeMiaToMm(upd.miaLMm, 1500) / 1000, activeTrMia).toFixed(3))
+                  : row.miaL,
+              miaB:
+                typeof upd.miaBMm === 'number'
+                  ? Number(metersToUnit(normalizeMiaToMm(upd.miaBMm, 1400) / 1000, activeTrMia).toFixed(3))
+                  : row.miaB,
+            };
+          })
+        );
+        summaries.push(`Sửa ${p.traverseUpdates.length} trạm đường chuyền`);
+      }
+
+      if (summaries.length === 0) return '';
+      const label = summaries.join(' · ');
+      showNotice(`Trợ lý AI: ${label}.`);
+      return label;
+    }
+
+    if (action.type === 'deleteData') {
+      const p = action.payload;
+      if (p.target === 'resetSample') {
+        traverseConfigRef.current = INITIAL_TRAVERSE_CONFIG;
+        detailUnitsRef.current = INITIAL_DETAIL_UNITS;
+        detailVertModeRef.current = 'Z';
+        setControlPoints(INITIAL_CONTROL_POINTS);
+        setTraverseConfig(INITIAL_TRAVERSE_CONFIG);
+        setTraverseRows(INITIAL_TRAVERSE_ROWS);
+        setDetailUnits(INITIAL_DETAIL_UNITS);
+        setDetailCurvature(true);
+        setDetailVertMode('Z');
+        setDetailRows(INITIAL_DETAIL_ROWS);
+        showNotice('Trợ lý AI đã khôi phục lại toàn bộ dữ liệu mẫu ban đầu.');
+        return 'Đã khôi phục bộ dữ liệu mẫu gốc';
+      }
+
+      if (p.target === 'all') {
+        setControlPoints([]);
+        setTraverseRows([]);
+        setDetailRows([]);
+        showNotice('Trợ lý AI đã xóa sạch dữ liệu cả 3 bảng để bạn bắt đầu khu đo mới.');
+        return 'Đã xóa sạch dữ liệu Mốc gốc, Đường chuyền và Sổ đo chi tiết';
+      }
+
+      if (p.target === 'controlPoints') {
+        if (p.clearAll) {
+          setControlPoints([]);
+          showNotice('Trợ lý AI đã xóa toàn bộ bảng Mốc gốc (Tab 1).');
+          return 'Đã xóa sạch bảng Mốc gốc (Tab 1)';
+        }
+        const names = p.names || [];
+        if (names.length > 0) {
+          setControlPoints((prev) => prev.filter((c) => !matchNameInList(c.name, names)));
+          const label = `Đã xóa mốc gốc: ${names.join(', ')}`;
+          showNotice(`Trợ lý AI: ${label}.`);
+          return label;
+        }
+      }
+
+      if (p.target === 'traverseRows') {
+        if (p.clearAll) {
+          setTraverseRows([]);
+          showNotice('Trợ lý AI đã xóa toàn bộ bảng Đường chuyền 2 mặt (Tab 2).');
+          return 'Đã xóa sạch bảng Đường chuyền 2 mặt (Tab 2)';
+        }
+        const names = p.names || [];
+        if (names.length > 0) {
+          setTraverseRows((prev) =>
+            prev.filter((r) => !matchNameInList(r.stationName, names) && !matchNameInList(r.targetName, names))
+          );
+          const label = `Đã xóa trạm đường chuyền: ${names.join(', ')}`;
+          showNotice(`Trợ lý AI: ${label}.`);
+          return label;
+        }
+      }
+
+      if (p.target === 'detailRows') {
+        if (p.clearAll) {
+          setDetailRows([]);
+          showNotice('Trợ lý AI đã xóa toàn bộ Sổ đo chi tiết (Tab 3).');
+          return 'Đã xóa sạch Sổ đo chi tiết (Tab 3)';
+        }
+        if (p.deleteErrorMiaRows) {
+          const badIds = new Set(detailComputed.computedRows.filter((r) => !r.isMiaOk).map((r) => r.id));
+          setDetailRows((prev) => prev.filter((r) => !badIds.has(r.id)));
+          const label = `Đã xóa ${badIds.size} điểm vượt sai số mia (> 2mm)`;
+          showNotice(`Trợ lý AI: ${label}.`);
+          return label;
+        }
+        const names = p.names || [];
+        if (names.length > 0) {
+          setDetailRows((prev) => prev.filter((r) => !matchNameInList(r.pointName, names)));
+          const label = `Đã xóa điểm chi tiết: ${names.join(', ')}`;
+          showNotice(`Trợ lý AI: ${label}.`);
+          return label;
+        }
+      }
+      return '';
+    }
+
+    if (action.type === 'exportData') {
+      setPendingExport(action.payload);
+      const fmt =
+        action.payload.format === 'excel_wps'
+          ? 'Excel WPS (.xlsx)'
+          : action.payload.format === 'civil3d_csv'
+            ? 'CSV Civil 3D (.csv)'
+            : 'AutoCAD Script (.scr)';
+      return `Đang tải xuống file ${fmt}`;
+    }
+
+    if (action.type === 'navigateOrOpenTool') {
+      const p = action.payload;
+      const parts: string[] = [];
+      if (p.tab) {
+        setActiveTab(p.tab);
+        const tabLabels: Record<TabKey, string> = {
+          control: 'Tab 1 (Mốc gốc)',
+          traverse: 'Tab 2 (Đường chuyền 2 mặt)',
+          detail: 'Tab 3 (Sổ đo chi tiết)',
+          height: 'Tab 4 (Đo cao & Tra cứu)',
+          map: 'Tab 5 (Bình đồ & Xuất file)',
+        };
+        parts.push(`Chuyển sang ${tabLabels[p.tab]}`);
+      }
+      if (p.openModal === 'guide') {
+        setGuideOpen(true);
+        parts.push('Mở Hướng dẫn Máy & Mia');
+      } else if (p.openModal === 'sheets') {
+        setSheetsOpen(true);
+        parts.push('Mở đồng bộ Google Sheets');
+      } else if (p.openModal === 'camera') {
+        setCameraOpen(true);
+        parts.push('Mở Camera quét số liệu');
+      } else if (p.openModal === 'import_file') {
+        quickFileInputRef.current?.click();
+        parts.push('Mở hộp thoại chọn file WPS/Excel/CSV');
+      }
+      return parts.join(' · ');
+    }
+
+    if (action.type === 'importControlPoints') {
+      const converted = convertAiControlPoints(action.payload);
+      if (converted.length === 0) return '';
+      const mode = action.payload.mode === 'replace' ? 'replace' : 'append';
+      setControlPoints((prev) => (mode === 'replace' ? converted : [...prev, ...converted]));
+      setActiveTab('control');
+      const label = `Đã ${mode === 'replace' ? 'thay thế' : 'thêm'} ${converted.length} mốc gốc vào Tab 1 (${converted.map((c) => c.name).join(', ')})`;
+      showNotice(`Trợ lý AI: ${label}.`);
+      return label;
+    }
+
+    if (action.type === 'importTraverseData') {
+      const cfg = action.payload.config;
+      if (cfg) {
+        setTraverseConfig((prev) => ({
+          ...prev,
+          verticalMode: cfg.verticalMode === 'V' || cfg.verticalMode === 'Z' ? cfg.verticalMode : prev.verticalMode,
+          traverseType:
+            cfg.traverseType === 'closed' || cfg.traverseType === 'connecting'
+              ? cfg.traverseType
+              : prev.traverseType,
+          toleranceGrade:
+            cfg.toleranceGrade === 'grade1' ||
+            cfg.toleranceGrade === 'grade2' ||
+            cfg.toleranceGrade === 'grade3'
+              ? cfg.toleranceGrade
+              : prev.toleranceGrade,
+          startStationName: cfg.startStationName?.trim() || prev.startStationName,
+          startOrientName: cfg.startOrientName?.trim() || prev.startOrientName,
+          endStationName: cfg.endStationName?.trim() || prev.endStationName,
+          endOrientName: cfg.endOrientName?.trim() || prev.endOrientName,
+        }));
+      }
+      const converted = convertAiTraverseRows(action.payload, traverseConfigRef.current.miaUnit);
+      if (converted.length === 0) return '';
+      const mode = action.payload.mode === 'replace' ? 'replace' : 'append';
+      setTraverseRows((prev) => (mode === 'replace' ? converted : [...prev, ...converted]));
+      setActiveTab('traverse');
+      const label = `Đã ${mode === 'replace' ? 'thay thế' : 'thêm'} ${converted.length} trạm đo 2 mặt vào Tab 2 & tự bình sai`;
+      showNotice(`Trợ lý AI: ${label}.`);
+      return label;
+    }
+
+    if (action.type === 'importDetailPoints') {
+      const activeUnits = detailUnitsRef.current;
+      const activeVertMode = detailVertModeRef.current;
+      const { rows: converted, detectedVerticalMode } = convertAiDetailRows(
+        action.payload,
+        activeUnits,
+        {
+          defaultStation: unifiedStations[1]?.name || unifiedStations[0]?.name || 'M1',
+          defaultOrient: unifiedStations[0]?.name || 'M0',
+          defaultVertMode: activeVertMode,
+          existingCount: detailRows.length,
+        }
+      );
+      if (converted.length === 0) return '';
+      if (detectedVerticalMode && detectedVerticalMode !== activeVertMode) {
+        detailVertModeRef.current = detectedVerticalMode;
+        setDetailVertMode(detectedVerticalMode);
+      }
+      const mode = action.payload.mode === 'replace' ? 'replace' : 'append';
+      setDetailRows((prev) => (mode === 'replace' ? converted : [...prev, ...converted]));
+      setActiveTab('detail');
+      const label = `Đã ${mode === 'replace' ? 'thay thế' : 'thêm'} ${converted.length} điểm đo vào Tab 3 (Sổ đo chi tiết)`;
+      showNotice(`Trợ lý AI: ${label}.`);
+      return label;
+    }
+
+    // Legacy single-point addDetailPoint action
+    const p = action.payload;
+    const activeUnits = detailUnitsRef.current;
+    const activeVertMode = detailVertModeRef.current;
+    const miaA = metersToUnit((p.miaAMm || 1600) / 1000, activeUnits.miaUnit);
+    const miaL = metersToUnit((p.miaLMm || 1500) / 1000, activeUnits.miaUnit);
+    const miaB = metersToUnit((p.miaBMm || 1400) / 1000, activeUnits.miaUnit);
+    const iVal = metersToUnit(p.instrumentHeightM || 1.48, activeUnits.instrumentHeightUnit);
+
+    if (p.verticalMode && p.verticalMode !== activeVertMode) {
+      detailVertModeRef.current = p.verticalMode;
       setDetailVertMode(p.verticalMode);
     }
 
@@ -244,7 +705,7 @@ export default function App() {
       instrumentHeight: Number(iVal.toFixed(3)),
       hzOrient: parseDmsString(p.hzOrientStr || '0'),
       hzPoint: parseDmsString(p.hzPointStr || '0'),
-      vertAngle: parseDmsString(p.vertAngleStr || (detailVertMode === 'Z' ? '90' : '0')),
+      vertAngle: parseDmsString(p.vertAngleStr || (detailVertModeRef.current === 'Z' ? '90' : '0')),
       miaA: Number(miaA.toFixed(3)),
       miaL: Number(miaL.toFixed(3)),
       miaB: Number(miaB.toFixed(3)),

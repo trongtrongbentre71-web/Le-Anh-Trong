@@ -183,11 +183,190 @@ export interface AiActionAddDetail {
   };
 }
 
+export interface AiActionImportControlPoints {
+  type: 'importControlPoints';
+  payload: {
+    mode?: 'append' | 'replace';
+    points: Array<{
+      name: string;
+      x: number;
+      y: number;
+      h: number;
+      note?: string;
+    }>;
+  };
+}
+
+export interface AiActionImportTraverseData {
+  type: 'importTraverseData';
+  payload: {
+    mode?: 'append' | 'replace';
+    config?: {
+      verticalMode?: VerticalCircleMode;
+      traverseType?: TraverseType;
+      toleranceGrade?: ToleranceGrade;
+      startStationName?: string;
+      startOrientName?: string;
+      endStationName?: string;
+      endOrientName?: string;
+    };
+    rows: Array<{
+      stationName: string;
+      targetName: string;
+      instrumentHeightM?: number;
+      hzBackLStr?: string;
+      hzForeLStr?: string;
+      hzBackRStr?: string;
+      hzForeRStr?: string;
+      vertLStr?: string;
+      vertRStr?: string;
+      miaAMm?: number;
+      miaLMm?: number;
+      miaBMm?: number;
+    }>;
+  };
+}
+
+export interface AiActionImportDetailPoints {
+  type: 'importDetailPoints';
+  payload: {
+    mode?: 'append' | 'replace';
+    verticalMode?: VerticalCircleMode;
+    rows: Array<{
+      pointName: string;
+      stationName?: string;
+      orientName?: string;
+      instrumentHeightM?: number;
+      hzOrientStr?: string;
+      hzPointStr?: string;
+      vertAngleStr?: string;
+      verticalMode?: VerticalCircleMode;
+      miaAMm?: number;
+      miaLMm?: number;
+      miaBMm?: number;
+      kind?: PointKind;
+      note?: string;
+    }>;
+  };
+}
+
+export interface AiActionUpdateSettings {
+  type: 'updateSettings';
+  payload: {
+    detailMiaUnit?: LengthUnit;
+    detailInstrumentHeightUnit?: LengthUnit;
+    detailOutputUnit?: LengthUnit;
+    detailVerticalMode?: VerticalCircleMode;
+    detailCurvatureEnabled?: boolean;
+    convertExistingDetailValues?: boolean;
+    traverseVerticalMode?: VerticalCircleMode;
+    traverseType?: TraverseType;
+    toleranceGrade?: ToleranceGrade;
+    traverseMiaUnit?: LengthUnit;
+    traverseCurvatureEnabled?: boolean;
+    startStationName?: string;
+    startOrientName?: string;
+    endStationName?: string;
+    endOrientName?: string;
+  };
+}
+
+export interface AiActionUpdatePoints {
+  type: 'updatePoints';
+  payload: {
+    controlUpdates?: Array<{
+      name: string;
+      newName?: string;
+      x?: number;
+      y?: number;
+      h?: number;
+      note?: string;
+    }>;
+    detailUpdates?: Array<{
+      pointName: string;
+      newPointName?: string;
+      stationName?: string;
+      orientName?: string;
+      instrumentHeightM?: number;
+      hzOrientStr?: string;
+      hzPointStr?: string;
+      vertAngleStr?: string;
+      miaAMm?: number;
+      miaLMm?: number;
+      miaBMm?: number;
+      kind?: PointKind;
+      note?: string;
+    }>;
+    traverseUpdates?: Array<{
+      stationName: string;
+      targetName?: string;
+      instrumentHeightM?: number;
+      hzBackLStr?: string;
+      hzForeLStr?: string;
+      hzBackRStr?: string;
+      hzForeRStr?: string;
+      vertLStr?: string;
+      vertRStr?: string;
+      miaAMm?: number;
+      miaLMm?: number;
+      miaBMm?: number;
+    }>;
+  };
+}
+
+export interface AiActionDeleteData {
+  type: 'deleteData';
+  payload: {
+    target: 'controlPoints' | 'traverseRows' | 'detailRows' | 'all' | 'resetSample';
+    names?: string[];
+    deleteErrorMiaRows?: boolean;
+    clearAll?: boolean;
+  };
+}
+
+export interface AiActionExportData {
+  type: 'exportData';
+  payload: {
+    format: 'excel_wps' | 'civil3d_csv' | 'autocad_scr';
+    cadTextHeight?: number;
+  };
+}
+
+export interface AiActionNavigateOrOpenTool {
+  type: 'navigateOrOpenTool';
+  payload: {
+    tab?: 'control' | 'traverse' | 'detail' | 'height' | 'map';
+    openModal?: 'guide' | 'sheets' | 'camera' | 'import_file';
+  };
+}
+
+export type AiSurveyAction =
+  | AiActionAddDetail
+  | AiActionImportControlPoints
+  | AiActionImportTraverseData
+  | AiActionImportDetailPoints
+  | AiActionUpdateSettings
+  | AiActionUpdatePoints
+  | AiActionDeleteData
+  | AiActionExportData
+  | AiActionNavigateOrOpenTool;
+
+export interface ChatAttachmentPreview {
+  id: string;
+  name: string;
+  kind: 'image' | 'pdf' | 'text';
+  mimeType: string;
+  sizeBytes: number;
+  previewUrl?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   text: string;
   timestamp: string;
   appliedActions?: string[];
+  attachments?: ChatAttachmentPreview[];
   isError?: boolean;
 }
+
